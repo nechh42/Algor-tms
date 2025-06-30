@@ -1,0 +1,167 @@
+//+------------------------------------------------------------------+
+//|                                  QuantumTrendPro.mq5             |
+//|                        Copyright 2024, Algorithmic Trading Ltd.  |
+//|                                        https://www.quantflow.com |
+//+------------------------------------------------------------------+
+#property copyright "QuantumTrend Pro Hybrid System"
+#property version   "1.20"
+#property description "Turtle Breakout + VWAP Momentum + Volatility Adaptive System"
+#property strict
+// Try using a relative path if the standard include fails
+#include "..\Include\Trade\Trade.mqh"
+
+//--- Input Parameters
+input double   RiskPercent    = 1.0;    // Risk per Trade (%)
+input int      TurtlePeriod   = 55;     // Turtle Breakout Period
+input int      VWAPPeriod     = 20;     // VWAP Calculation Period
+input double   ATRMultiplier  = 2.0;    // Volatility Position Scaling
+input bool     EnableMacroFilter=true;  // Macro Event Filter
+
+//--- Global Variables
+double positionSize;
+datetime lastTradeTime;
+int turtleHandle, vwapHandle, atrHandle;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- Initialize technical indicators
+   turtleHandle = iCustom(NULL, 0, "TurtleBreakout", TurtlePeriod);
+   vwapHandle = iCustom(NULL, 0, "VWAP", VWAPPeriod);
+   atrHandle = iATR(NULL, PERIOD_D1, 14);
+   
+   if(turtleHandle == INVALID_HANDLE || vwapHandle == INVALID_HANDLE)
+      return INIT_FAILED;
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   //--- Check for new bar
+   if(!IsNewBar()) return;
+   
+   //--- Risk Management Module
+   if(IsHighImpactEvent() && EnableMacroFilter)
+   {
+      Comment("Macro Event Detected - No Trading");
+      return;
+   }
+   
+   //--- Get indicator values
+   double turtleSignal[2];
+   CopyBuffer(turtleHandle, 0, 1, 2, turtleSignal);
+   
+   double vwapValue[2];
+   CopyBuffer(vwapHandle, 0, 1, 2, vwapValue);
+   
+   double atrValue = iATR(NULL, PERIOD_D1, 14, 0);
+   
+   //--- Calculate dynamic position size
+   positionSize = CalculatePositionSize(atrValue);
+   
+   //--- Trading Logic
+   bool buySignal = turtleSignal[1] > turtleSignal[0] && 
+                   Close[1] > vwapValue[1] &&
+                   MomentumConfirmation();
+                   
+   bool sellSignal = turtleSignal[1] < turtleSignal[0] && 
+                    Close[1] < vwapValue[1] &&
+                    MomentumConfirmation();
+   
+   //--- Execute trades
+   if(buySignal)
+      ExecuteTrade(ORDER_TYPE_BUY);
+   else if(sellSignal)
+      ExecuteTrade(ORDER_TYPE_SELL);
+}
+
+//+------------------------------------------------------------------+
+//| Position Size Calculation with Volatility Scaling                |
+//+------------------------------------------------------------------+
+double CalculatePositionSize(double atr)
+{
+   double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskAmount = accountEquity * (RiskPercent / 100.0);
+   return NormalizeDouble(riskAmount / (atr * ATRMultiplier), 2);
+}
+
+//+------------------------------------------------------------------+
+//| Advanced Momentum Confirmation (RSI + MACD)                      |
+//+------------------------------------------------------------------+
+bool MomentumConfirmation()
+{
+   double rsi = iRSI(NULL, 0, 14, PRICE_CLOSE, 0);
+   double macd = iMACD(NULL, 0, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0);
+   
+   if(rsi == EMPTY_VALUE || macd == EMPTY_VALUE) 
+      return false;
+   
+   return (rsi > 50 && macd > 0) || (rsi < 50 && macd < 0);
+}
+
+//+------------------------------------------------------------------+
+//| Macro Event Detection (News API Integration)                     |
+//+------------------------------------------------------------------+
+bool IsHighImpactEvent()
+{
+   //--- In live trading, integrate with News API (e.g., Forex Factory)
+   //--- Mock implementation:
+   string importantEvents[] = {"NFP", "FOMC", "CPI", "ECB Press Conference"};
+   string currentEvent = "FOMC"; // Replace with API call
+   
+   for(int i=0; i<ArraySize(importantEvents); i++)
+      if(StringFind(currentEvent, importantEvents[i]) != -1)
+         return true;
+         
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Trade Execution with Advanced Risk Controls                      |
+//+------------------------------------------------------------------+
+void ExecuteTrade(ENUM_ORDER_TYPE orderType)
+{
+   //--- Prevent multiple trades in same direction
+   if(OrdersTotal() > 0) return;
+   
+   double price = (orderType == ORDER_TYPE_BUY) ? Ask : Bid;
+   double sl = (orderType == ORDER_TYPE_BUY) ? 
+               price - (iATR(NULL, 0, 14, 0) * 1.5) : 
+               price + (iATR(NULL, 0, 14, 0) * 1.5);
+               
+   MqlTradeRequest request = {0};
+   MqlTradeResult result = {0};
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = Symbol();
+   request.volume = positionSize;
+   request.type = orderType;
+   request.price = price;
+   request.sl = sl;
+   request.deviation = 10;
+   
+   //--- Send trade order
+   if(!OrderSend(request, result))
+      Print("Trade Error: ", GetLastError());
+}
+
+//+------------------------------------------------------------------+
+//| Utility Functions                                                |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   static datetime lastBar;
+   datetime currentBar = iTime(NULL, 0, 0);
+   if(lastBar != currentBar)
+   {
+      lastBar = currentBar;
+      return true;
+   }
+   return false;
+}
